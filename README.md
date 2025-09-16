@@ -1,0 +1,2 @@
+# azurest
+azure automation
