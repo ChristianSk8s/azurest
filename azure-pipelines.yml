@@ -1,19 +1,118 @@
-# Starter pipeline
-# Start with a minimal pipeline that you can customize to build and deploy your code.
-# Add steps that build, run tests, deploy, and more:
-# https://aka.ms/yaml
+trigger: none
+pr: none
 
-trigger:
-- main
+parameters:
+- name: environment
+  displayName: "Target Environment"
+  type: string
+  default: dev
+  values:
+  - dev
+  - test
+  - prod
 
-pool:
-  vmImage: ubuntu-latest
+- name: envOctet
+  displayName: "Env octet (for CIDR)"
+  type: number
+  default: 1
 
-steps:
-- script: echo Hello, world!
-  displayName: 'Run a one-line script'
+variables:
+- group: Terraform-SP   # variable group with SP creds + subscription
 
-- script: |
-    echo Add other tasks to build, test, and deploy your project.
-    echo See https://aka.ms/yaml
-  displayName: 'Run a multi-line script'
+stages:
+# Network Approval
+- stage: Network
+  displayName: "Network Approval"
+  jobs:
+  - deployment: WaitNetwork
+    displayName: "Awaiting Network Approval"
+    environment: "NE-Approval"
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - script: echo "Approved by Network team"
+
+# InfoSec Approval
+- stage: InfoSec
+  displayName: "InfoSec Approval"
+  dependsOn: Network
+  jobs:
+  - deployment: WaitInfoSec
+    displayName: "Awaiting InfoSec Approval"
+    environment: "InfoSec-Approval"
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - script: echo "Approved by InfoSec team"
+
+# Server Approval
+- stage: Server
+  displayName: "Server Approval"
+  dependsOn: InfoSec
+  jobs:
+  - deployment: WaitServer
+    displayName: "Awaiting Server Approval"
+    environment: "SE-Approval"
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - script: echo "Approved by Server team"
+
+# Apps (CCoE) Approval + Terraform
+- stage: App
+  displayName: "Apps (CCoE) Approval + Terraform"
+  dependsOn: Server
+  jobs:
+  - deployment: Terraform
+    displayName: "Terraform Apply"
+    environment: "CCoE-Approval"
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+
+          - task: Bash@3
+            displayName: "Install Terraform"
+            inputs:
+              targetType: inline
+              script: |
+                curl -fsSL https://releases.hashicorp.com/terraform/1.6.0/terraform_1.6.0_linux_amd64.zip -o terraform.zip
+                unzip terraform.zip -d /usr/local/bin
+                terraform -version
+
+          - task: Bash@3
+            displayName: "Terraform Init & Plan"
+            env:
+              ARM_CLIENT_ID: $(clientId)
+              ARM_CLIENT_SECRET: $(clientSecret)
+              ARM_SUBSCRIPTION_ID: $(subscriptionId)
+              ARM_TENANT_ID: $(tenantId)
+            inputs:
+              targetType: inline
+              script: |
+                terraform init \
+                  -backend-config="resource_group_name=tfstate-rg" \
+                  -backend-config="storage_account_name=tfstateuniquesuffix" \
+                  -backend-config="container_name=tfstate" \
+                  -backend-config="key=$(Build.BuildId).tfstate"
+
+                terraform plan \
+                  -var "resource_group_name=demo-rg-${{ parameters.environment }}" \
+                  -var "env_octet=${{ parameters.envOctet }}" \
+                  -out=tfplan
+
+          - task: Bash@3
+            displayName: "Terraform Apply"
+            env:
+              ARM_CLIENT_ID: $(clientId)
+              ARM_CLIENT_SECRET: $(clientSecret)
+              ARM_SUBSCRIPTION_ID: $(subscriptionId)
+              ARM_TENANT_ID: $(tenantId)
+            inputs:
+              targetType: inline
+              script: |
+                terraform apply -auto-approve tfplan
